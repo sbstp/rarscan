@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use clap::Parser;
 use lazy_static::lazy_static;
 use regex::Regex;
 use simple_logger::SimpleLogger;
@@ -23,20 +24,26 @@ fn is_root_rar_file(path: &Path) -> bool {
 }
 
 pub struct UnarchiveQueue {
+    dry_run: bool,
     queue: VecDeque<PathBuf>,
 }
 
 impl UnarchiveQueue {
-    pub fn new() -> UnarchiveQueue {
-        UnarchiveQueue { queue: VecDeque::new() }
+    pub fn new(dry_run: bool) -> UnarchiveQueue {
+        UnarchiveQueue {
+            dry_run,
+            queue: VecDeque::new(),
+        }
     }
 
     pub fn find_rar_files(&mut self, root_dir: impl AsRef<Path>) -> anyhow::Result<()> {
+        log::info!("Scanning for .rar files in '{}'", root_dir.as_ref().display());
         let pattern = root_dir.as_ref().join("**/*.rar");
         let pattern = pattern.to_string_lossy();
         for entry in glob::glob(&pattern)? {
             let entry = entry?;
             if is_root_rar_file(&entry) {
+                log::debug!("'{}' enqueued.", entry.display());
                 self.queue.push_back(entry);
             }
         }
@@ -62,7 +69,9 @@ impl UnarchiveQueue {
             log::info!("-> Archive already extracted.");
         } else {
             log::info!("-> Extracting into '{}'.", dest.display());
-            archive.extract_into(dest)?;
+            if !self.dry_run {
+                archive.extract_into(dest)?;
+            }
         }
 
         for header in archive.headers {
@@ -98,10 +107,19 @@ impl Archive {
             match fs::metadata(dest.join(&header.filename)) {
                 Ok(md) => {
                     if md.len() != header.unpacked_size {
+                        log::debug!(
+                            "'{}' size mismatch, got {} want {}",
+                            header.filename.display(),
+                            header.unpacked_size,
+                            md.len()
+                        );
                         return Ok(false);
                     }
                 }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    log::debug!("'{}' not found in destination", header.filename.display());
+                    return Ok(false);
+                }
                 Err(e) => return Err(e.into()),
             }
         }
@@ -121,11 +139,25 @@ impl Archive {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    SimpleLogger::new().init().unwrap();
+#[derive(Parser, Debug)]
+struct Args {
+    root_dir: String,
+    #[arg(long, default_value = "info")]
+    log_level: log::LevelFilter,
+    #[arg(long, default_value = "false")]
+    dry_run: bool,
+}
 
-    let mut q = UnarchiveQueue::new();
-    q.find_rar_files("/mnt/tank/video/tv-en/Bones")?;
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    SimpleLogger::new()
+        .with_level(args.log_level)
+        .init()
+        .expect("unable to install logging");
+
+    let mut q = UnarchiveQueue::new(args.dry_run);
+    q.find_rar_files(args.root_dir)?;
     while q.process_next()? {}
     Ok(())
 }
