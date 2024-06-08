@@ -23,6 +23,6 @@ jobs:
       - uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/x86_64-unknown-linux-musl/release/rarscan
+          file: target/release/rarscan
           asset_name: rarscan-linux-amd64
           tag: ${{ github.ref }}
