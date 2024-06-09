@@ -2,16 +2,22 @@ use std::{
     collections::VecDeque,
     fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use clap::Parser;
 use lazy_static::lazy_static;
 use regex::Regex;
 use simple_logger::SimpleLogger;
+use time::{
+    format_description::{self, OwnedFormatItem},
+    OffsetDateTime,
+};
 use unrar::FileHeader;
 
 lazy_static! {
     static ref RE_PART_FILE: Regex = Regex::new("part(\\d+).rar$").unwrap();
+    static ref TIME_FORMAT: OwnedFormatItem = format_description::parse_owned::<2>("[year]-[month]-[day]").unwrap();
 }
 
 fn is_root_rar_file(path: &Path) -> bool {
@@ -25,13 +31,15 @@ fn is_root_rar_file(path: &Path) -> bool {
 
 pub struct UnarchiveQueue {
     dry_run: bool,
+    remove_after: Option<Duration>,
     queue: VecDeque<PathBuf>,
 }
 
 impl UnarchiveQueue {
-    pub fn new(dry_run: bool) -> UnarchiveQueue {
+    pub fn new(dry_run: bool, remove_after: Option<Duration>) -> UnarchiveQueue {
         UnarchiveQueue {
             dry_run,
+            remove_after,
             queue: VecDeque::new(),
         }
     }
@@ -74,10 +82,30 @@ impl UnarchiveQueue {
             }
         }
 
-        for header in archive.headers {
+        for header in &archive.headers {
             if is_root_rar_file(&header.filename) {
                 log::info!("-> Archive contains archive '{}', enqueuing", header.filename.display());
-                self.queue.push_back(dest.join(header.filename));
+                self.queue.push_back(dest.join(&header.filename));
+            }
+        }
+
+        if let Some(remove_after) = self.remove_after {
+            for entry in archive.list_parts()? {
+                let md = entry.metadata()?;
+                let mtime = md.modified()?;
+                let elapsed = mtime.elapsed().unwrap_or(Duration::from_millis(0));
+                if elapsed > remove_after {
+                    log::info!(
+                        "-> Removing archive/part '{}' last modified on '{}'.",
+                        entry.display(),
+                        OffsetDateTime::from(mtime)
+                            .format(&TIME_FORMAT)
+                            .unwrap_or_else(|_| "Unknown".into()),
+                    );
+                    if !self.dry_run {
+                        fs::remove_file(entry)?;
+                    }
+                }
             }
         }
 
@@ -88,6 +116,7 @@ impl UnarchiveQueue {
 struct Archive {
     pub path: PathBuf,
     pub headers: Vec<FileHeader>,
+    pub parts_glob: PathBuf,
 }
 
 impl Archive {
@@ -99,7 +128,12 @@ impl Archive {
             let header = header?;
             headers.push(header);
         }
-        Ok(Archive { path, headers })
+
+        Ok(Archive {
+            parts_glob: unrar::Archive::new(&path).all_parts(),
+            path,
+            headers,
+        })
     }
 
     pub fn is_already_extracted(&self, dest: &Path) -> anyhow::Result<bool> {
@@ -137,6 +171,16 @@ impl Archive {
         }
         Ok(())
     }
+
+    pub fn list_parts(&self) -> anyhow::Result<Vec<PathBuf>> {
+        let pattern = &self.parts_glob.to_string_lossy();
+        let mut results = Vec::new();
+        for entry in glob::glob(pattern)? {
+            let entry = entry?;
+            results.push(entry);
+        }
+        Ok(results)
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -146,6 +190,8 @@ struct Args {
     log_level: log::LevelFilter,
     #[arg(long, default_value = "false")]
     dry_run: bool,
+    #[arg(long)]
+    remove_after_hours: Option<u64>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -156,7 +202,10 @@ fn main() -> anyhow::Result<()> {
         .init()
         .expect("unable to install logging");
 
-    let mut q = UnarchiveQueue::new(args.dry_run);
+    let mut q = UnarchiveQueue::new(
+        args.dry_run,
+        args.remove_after_hours.map(|h| Duration::from_secs(60 * 60 * 24 * h)),
+    );
     q.find_rar_files(args.root_dir)?;
     while q.process_next()? {}
     Ok(())
