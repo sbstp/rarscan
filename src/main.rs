@@ -91,7 +91,9 @@ impl UnarchiveQueue {
         }
 
         if let Some(remove_after) = self.remove_after {
-            for entry in archive.list_parts().context("list parts")? {
+            let parts = archive.list_parts().context("list parts")?;
+            log::debug!("-> Found {} parts", parts.len());
+            for entry in parts {
                 let md = entry.metadata().context("stat part")?;
                 let mtime = md.modified().context("get part mtime")?;
                 let elapsed = mtime.elapsed().unwrap_or(Duration::from_millis(0));
@@ -205,7 +207,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut q = UnarchiveQueue::new(
         args.dry_run,
-        args.remove_after_hours.map(|h| Duration::from_secs(60 * 60 * 24 * h)),
+        args.remove_after_hours.map(|h| Duration::from_secs(60 * 60 * h)),
     );
     q.find_rar_files(args.root_dir)?;
     while q.process_next()? {}
