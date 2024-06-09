@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use clap::Parser;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -48,7 +49,7 @@ impl UnarchiveQueue {
         log::info!("Scanning for .rar files in '{}'", root_dir.as_ref().display());
         let pattern = root_dir.as_ref().join("**/*.rar");
         let pattern = pattern.to_string_lossy();
-        for entry in glob::glob(&pattern)? {
+        for entry in glob::glob(&pattern).context("glob .rar files")? {
             let entry = entry?;
             if is_root_rar_file(&entry) {
                 log::debug!("'{}' enqueued.", entry.display());
@@ -62,7 +63,7 @@ impl UnarchiveQueue {
         match self.queue.pop_front() {
             None => Ok(false),
             Some(entry) => {
-                self.process_entry(entry)?;
+                self.process_entry(entry).context("process entry")?;
                 Ok(true)
             }
         }
@@ -70,15 +71,15 @@ impl UnarchiveQueue {
 
     fn process_entry(&mut self, entry: PathBuf) -> anyhow::Result<()> {
         log::info!("Analyzing '{}'.", entry.display());
-        let archive = Archive::open(entry)?;
-        let dest = archive.path.as_path().parent().unwrap();
+        let archive = Archive::open(entry).context("archive open")?;
+        let dest = archive.path.as_path().parent().expect("no parent path");
 
-        if archive.is_already_extracted(dest)? {
+        if archive.is_already_extracted(dest).context("is already extracted")? {
             log::info!("-> Archive already extracted.");
         } else {
             log::info!("-> Extracting into '{}'.", dest.display());
             if !self.dry_run {
-                archive.extract_into(dest)?;
+                archive.extract_into(dest).context("extract_into")?;
             }
         }
 
@@ -90,9 +91,9 @@ impl UnarchiveQueue {
         }
 
         if let Some(remove_after) = self.remove_after {
-            for entry in archive.list_parts()? {
-                let md = entry.metadata()?;
-                let mtime = md.modified()?;
+            for entry in archive.list_parts().context("list parts")? {
+                let md = entry.metadata().context("stat part")?;
+                let mtime = md.modified().context("get part mtime")?;
                 let elapsed = mtime.elapsed().unwrap_or(Duration::from_millis(0));
                 if elapsed > remove_after {
                     log::info!(
@@ -103,7 +104,7 @@ impl UnarchiveQueue {
                             .unwrap_or_else(|_| "Unknown".into()),
                     );
                     if !self.dry_run {
-                        fs::remove_file(entry)?;
+                        fs::remove_file(entry).context("remove part")?;
                     }
                 }
             }
@@ -175,7 +176,7 @@ impl Archive {
     pub fn list_parts(&self) -> anyhow::Result<Vec<PathBuf>> {
         let pattern = &self.parts_glob.to_string_lossy();
         let mut results = Vec::new();
-        for entry in glob::glob(pattern)? {
+        for entry in glob::glob(pattern).context("glob parts")? {
             let entry = entry?;
             results.push(entry);
         }
