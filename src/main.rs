@@ -1,8 +1,9 @@
 use std::{
     collections::VecDeque,
-    fs, io,
+    fs::{self, File},
+    io,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::Context;
@@ -28,6 +29,12 @@ fn is_root_rar_file(path: &Path) -> bool {
         return part_num == 1;
     }
     file_name.ends_with(".rar")
+}
+
+fn format_system_time(t: SystemTime) -> String {
+    OffsetDateTime::from(t)
+        .format(&TIME_FORMAT)
+        .unwrap_or_else(|_| "Unknown".into())
 }
 
 pub struct UnarchiveQueue {
@@ -71,6 +78,9 @@ impl UnarchiveQueue {
 
     fn process_entry(&mut self, entry: PathBuf) -> anyhow::Result<()> {
         log::info!("Analyzing '{}'.", entry.display());
+        let entry_metadata = entry.metadata()?;
+        let entry_mtime = entry_metadata.modified()?;
+
         let archive = Archive::open(entry).context("archive open")?;
         let dest = archive.path.as_path().parent().expect("no parent path");
 
@@ -87,6 +97,22 @@ impl UnarchiveQueue {
             if is_root_rar_file(&header.filename) {
                 log::info!("-> Archive contains archive '{}', enqueuing", header.filename.display());
                 self.queue.push_back(dest.join(&header.filename));
+
+                // When an embedded rar is extracted from the root rar, the mtime data is taken from the rar and applied
+                // on the extracted file. We get the original date of when the rar was created. This affects the removal
+                // system which depends on the date when the rar was extracted, not when it was originally created.
+                // This resets the mtime of the embedded rar to be the same as the root rar so they both get removed at
+                // the same time.
+                let extracted_path = dest.join(&header.filename);
+                let f = File::options()
+                    .write(true)
+                    .open(extracted_path)
+                    .context("opening embedded rar")?;
+                f.set_modified(entry_mtime).context("updating mtime on embedded rar")?;
+                log::info!(
+                    "-> Update extracted embedded archive mtime to {}",
+                    format_system_time(entry_mtime),
+                );
             }
         }
 
@@ -101,9 +127,7 @@ impl UnarchiveQueue {
                     log::info!(
                         "-> Removing archive/part '{}' last modified on '{}'.",
                         entry.display(),
-                        OffsetDateTime::from(mtime)
-                            .format(&TIME_FORMAT)
-                            .unwrap_or_else(|_| "Unknown".into()),
+                        format_system_time(entry_mtime),
                     );
                     if !self.dry_run {
                         fs::remove_file(entry).context("remove part")?;
