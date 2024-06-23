@@ -100,9 +100,9 @@ impl UnarchiveQueue {
 
                 // When an embedded rar is extracted from the root rar, the mtime data is taken from the rar and applied
                 // on the extracted file. We get the original date of when the rar was created. This affects the removal
-                // system which depends on the date when the rar was extracted, not when it was originally created.
-                // This resets the mtime of the embedded rar to be the same as the root rar so they both get removed at
-                // the same time.
+                // system which depends on the date when the rar was extracted, not when it was originally created. This
+                // resets the mtime of the embedded rar to be the same as the root rar so they both get removed at the
+                // same time.
                 let extracted_path = dest.join(&header.filename);
                 let f = File::options()
                     .write(true)
@@ -110,7 +110,8 @@ impl UnarchiveQueue {
                     .context("opening embedded rar")?;
                 f.set_modified(entry_mtime).context("updating mtime on embedded rar")?;
                 log::info!(
-                    "-> Update extracted embedded archive mtime to {}",
+                    "-> Update '{}' mtime to {}",
+                    header.filename.display(),
                     format_system_time(entry_mtime),
                 );
             }
