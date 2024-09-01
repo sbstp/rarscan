@@ -25,7 +25,7 @@ lazy_static! {
 fn is_root_rar_file(path: &Path) -> bool {
     let file_name = path.file_name().and_then(|s| s.to_str()).expect("invalid file_name");
     if let Some(caps) = RE_PART_FILE.captures(file_name) {
-        let part_num = u64::from_str_radix(&caps[1], 10).unwrap();
+        let part_num = caps[1].parse::<u64>().unwrap();
         return part_num == 1;
     }
     file_name.ends_with(".rar")
@@ -121,15 +121,8 @@ impl UnarchiveQueue {
             let parts = archive.list_parts().context("list parts")?;
             log::debug!("-> Found {} parts", parts.len());
             for entry in parts {
-                let md = entry.metadata().context("stat part")?;
-                let mtime = md.modified().context("get part mtime")?;
-                let elapsed = mtime.elapsed().unwrap_or(Duration::from_millis(0));
-                if elapsed > remove_after {
-                    log::info!(
-                        "-> Removing archive/part '{}' last modified on '{}'.",
-                        entry.display(),
-                        format_system_time(entry_mtime),
-                    );
+                if self.should_remove(&entry, remove_after)? {
+                    log::info!("-> Removing archive/part '{}'.", entry.display(),);
                     if !self.dry_run {
                         fs::remove_file(entry).context("remove part")?;
                     }
@@ -137,6 +130,32 @@ impl UnarchiveQueue {
             }
         }
 
+        Ok(())
+    }
+
+    fn should_remove(&self, path: &Path, remove_after: Duration) -> anyhow::Result<bool> {
+        let md = path.metadata().context("stat part")?;
+        let mtime = md.modified().context("get part mtime")?;
+        let elapsed = mtime.elapsed().unwrap_or(Duration::from_millis(0));
+        Ok(elapsed > remove_after)
+    }
+
+    fn find_cruft(&self, root_dir: impl AsRef<Path>, remove_after: Duration) -> anyhow::Result<()> {
+        let remove_pattern = |pattern: &str| -> anyhow::Result<()> {
+            let pattern = root_dir.as_ref().join(pattern);
+            for entry in glob::glob(&pattern.to_string_lossy())? {
+                let entry = entry?;
+                if self.should_remove(&entry, remove_after)? {
+                    log::info!("Removing cruft '{}'.", entry.display());
+                    if !self.dry_run {
+                        fs::remove_file(&entry)?;
+                    }
+                }
+            }
+            Ok(())
+        };
+        remove_pattern("**/*.r??")?;
+        remove_pattern("**/*.sfv")?;
         Ok(())
     }
 }
@@ -230,11 +249,15 @@ fn main() -> anyhow::Result<()> {
         .init()
         .expect("unable to install logging");
 
-    let mut q = UnarchiveQueue::new(
-        args.dry_run,
-        args.remove_after_hours.map(|h| Duration::from_secs(60 * 60 * h)),
-    );
-    q.find_rar_files(args.root_dir)?;
+    let remove_after = args.remove_after_hours.map(|h| Duration::from_secs(60 * 60 * h));
+
+    let mut q = UnarchiveQueue::new(args.dry_run, remove_after);
+    q.find_rar_files(&args.root_dir)?;
     while q.process_next()? {}
+
+    if let Some(remove_after) = remove_after {
+        q.find_cruft(&args.root_dir, remove_after)?;
+    }
+
     Ok(())
 }
