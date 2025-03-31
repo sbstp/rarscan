@@ -70,13 +70,15 @@ impl UnarchiveQueue {
         match self.queue.pop_front() {
             None => Ok(false),
             Some(entry) => {
-                self.process_entry(entry).context("process entry")?;
+                if let Err(e) = self.process_entry(&entry) {
+                    log::error!("Error '{e}' for entry '{}'.", entry.display());
+                }
                 Ok(true)
             }
         }
     }
 
-    fn process_entry(&mut self, entry: PathBuf) -> anyhow::Result<()> {
+    fn process_entry(&mut self, entry: &Path) -> anyhow::Result<()> {
         log::info!("Analyzing '{}'.", entry.display());
         let entry_metadata = entry.metadata()?;
         let entry_mtime = entry_metadata.modified()?;
